@@ -553,7 +553,7 @@ class HelloConan(ConanFile):
         settings.compiler.version = "14"
         # test build_type and arch override, for multi-config packages
         cmd = tools.msvc_build_command(settings, "project.sln", build_type="Debug", arch="x86")
-        self.assertIn('msbuild project.sln /p:Configuration=Debug /p:Platform="x86"', cmd)
+        self.assertIn('msbuild "project.sln" /p:Configuration="Debug" /p:Platform="x86"', cmd)
         self.assertIn('vcvarsall.bat', cmd)
 
         # tests errors if args not defined
@@ -566,7 +566,7 @@ class HelloConan(ConanFile):
         # successful definition via settings
         settings.build_type = "Debug"
         cmd = tools.msvc_build_command(settings, "project.sln")
-        self.assertIn('msbuild project.sln /p:Configuration=Debug /p:Platform="x86"', cmd)
+        self.assertIn('msbuild "project.sln" /p:Configuration="Debug" /p:Platform="x86"', cmd)
         self.assertIn('vcvarsall.bat', cmd)
 
     @unittest.skipUnless(platform.system() == "Windows", "Requires vswhere")
@@ -656,6 +656,23 @@ class HelloConan(ConanFile):
             self.assertIn("Conan:vcvars already set", str(output))
             self.assertIn("VS140COMNTOOLS=", str(output))
 
+    @unittest.skipUnless(platform.system() == "Windows", "Requires Windows")
+    def vcvars_amd64_32_cross_building_support_test(self):
+        # amd64_x86 crossbuilder
+        settings = Settings.loads(default_settings_yml)
+        settings.os = "Windows"
+        settings.compiler = "Visual Studio"
+        settings.compiler.version = "15"
+        settings.arch = "x86"
+        settings.arch_build = "x86_64"
+        cmd = tools.vcvars_command(settings)
+        self.assertIn('vcvarsall.bat" amd64_x86', cmd)
+
+        # It follows arch_build first
+        settings.arch_build = "x86"
+        cmd = tools.vcvars_command(settings)
+        self.assertIn('vcvarsall.bat" x86', cmd)
+
     def vcvars_raises_when_not_found_test(self):
         text = """
 os: [Windows]
@@ -742,6 +759,20 @@ compiler:
             self.assertNotIn("MYVAR", ret)
             self.assertIn("VCINSTALLDIR", ret)
 
+        my_lib_paths = "C:\\PATH\TO\MYLIBS;C:\\OTHER_LIBPATH"
+        with tools.environment_append({"LIBPATH": my_lib_paths}):
+            ret = vcvars_dict(settings, only_diff=False)
+            str_var_value = os.pathsep.join(ret["LIBPATH"])
+            self.assertTrue(str_var_value.endswith(my_lib_paths))
+
+            # Now only a diff, it should return the values as a list, but without the old values
+            ret = vcvars_dict(settings, only_diff=True)
+            self.assertEquals(ret["LIBPATH"], str_var_value.split(os.pathsep)[0:-2])
+
+            # But if we apply both environments, they are composed correctly
+            with tools.environment_append(ret):
+                self.assertEquals(os.environ["LIBPATH"], str_var_value)
+
     def vcvars_dict_test(self):
         # https://github.com/conan-io/conan/issues/2904
         output_with_newline_and_spaces = """__BEGINS__
@@ -796,10 +827,11 @@ ProgramFiles(x86)=C:\Program Files (x86)
                 self._runner = MyRun()
 
         conanfile = MockConanfile()
-        tools.run_in_windows_bash(conanfile, "a_command.bat", subsystem="cygwin")
-        self.assertIn("bash", conanfile._runner.command)
-        self.assertIn("--login -c", conanfile._runner.command)
-        self.assertIn("^&^& a_command.bat ^", conanfile._runner.command)
+        with patch.object(OSInfo, "bash_path", return_value='bash'):
+            tools.run_in_windows_bash(conanfile, "a_command.bat", subsystem="cygwin")
+            self.assertIn("bash", conanfile._runner.command)
+            self.assertIn("--login -c", conanfile._runner.command)
+            self.assertIn("^&^& a_command.bat ^", conanfile._runner.command)
 
         with tools.environment_append({"CONAN_BASH_PATH": "path\\to\\mybash.exe"}):
             tools.run_in_windows_bash(conanfile, "a_command.bat", subsystem="cygwin")
@@ -811,13 +843,14 @@ ProgramFiles(x86)=C:\Program Files (x86)
 
         # try to append more env vars
         conanfile = MockConanfile()
-        tools.run_in_windows_bash(conanfile, "a_command.bat", subsystem="cygwin", env={"PATH": "/other/path",
-                                                                                       "MYVAR": "34"})
-        self.assertIn('^&^& PATH=\\^"/cygdrive/other/path:/cygdrive/path/to/somewhere:$PATH\\^" '
-                      '^&^& MYVAR=34 ^&^& a_command.bat ^', conanfile._runner.command)
+        with patch.object(OSInfo, "bash_path", return_value='bash'):
+            tools.run_in_windows_bash(conanfile, "a_command.bat", subsystem="cygwin",
+                                      env={"PATH": "/other/path", "MYVAR": "34"})
+            self.assertIn('^&^& PATH=\\^"/cygdrive/other/path:/cygdrive/path/to/somewhere:$PATH\\^" '
+                          '^&^& MYVAR=34 ^&^& a_command.bat ^', conanfile._runner.command)
 
     def download_retries_test(self):
-        http_server = StoppableThreadBottle(port=8267)
+        http_server = StoppableThreadBottle()
 
         with tools.chdir(tools.mkdir_tmp()):
             with open("manual.html", "w") as fmanual:
@@ -1013,7 +1046,7 @@ ProgramFiles(x86)=C:\Program Files (x86)
     def detect_windows_subsystem_test(self):
         # Dont raise test
         result = tools.os_info.detect_windows_subsystem()
-        if not tools.os_info.bash_path or platform.system() != "Windows":
+        if not tools.os_info.bash_path() or platform.system() != "Windows":
             self.assertEqual(None, result)
         else:
             self.assertEqual(str, type(result))
@@ -1125,7 +1158,7 @@ class GitToolTest(unittest.TestCase):
     def test_clone_submodule_git(self):
         subsubmodule, _ = create_local_git_repo({"subsubmodule": "contents"})
         submodule, _ = create_local_git_repo({"submodule": "contents"}, submodules=[subsubmodule])
-        path, _ = create_local_git_repo({"myfile": "contents"}, submodules=[submodule])
+        path, commit = create_local_git_repo({"myfile": "contents"}, submodules=[submodule])
 
         def _create_paths():
             tmp = temp_folder()
@@ -1147,13 +1180,15 @@ class GitToolTest(unittest.TestCase):
         # Check invalid value
         tmp, submodule_path, subsubmodule_path = _create_paths()
         git = Git(tmp)
+        git.clone(path)
         with self.assertRaisesRegexp(ConanException, "Invalid 'submodule' attribute value in the 'scm'."):
-            git.clone(path, submodule="invalid")
+            git.checkout(commit, submodule="invalid")
 
         # Check shallow
         tmp, submodule_path, subsubmodule_path = _create_paths()
         git = Git(tmp)
-        git.clone(path, submodule="shallow")
+        git.clone(path)
+        git.checkout(commit, submodule="shallow")
         self.assertTrue(os.path.exists(os.path.join(tmp, "myfile")))
         self.assertTrue(os.path.exists(os.path.join(submodule_path, "submodule")))
         self.assertFalse(os.path.exists(os.path.join(subsubmodule_path, "subsubmodule")))
@@ -1161,7 +1196,8 @@ class GitToolTest(unittest.TestCase):
         # Check recursive
         tmp, submodule_path, subsubmodule_path = _create_paths()
         git = Git(tmp)
-        git.clone(path, submodule="recursive")
+        git.clone(path)
+        git.checkout(commit, submodule="recursive")
         self.assertTrue(os.path.exists(os.path.join(tmp, "myfile")))
         self.assertTrue(os.path.exists(os.path.join(submodule_path, "submodule")))
         self.assertTrue(os.path.exists(os.path.join(subsubmodule_path, "subsubmodule")))
